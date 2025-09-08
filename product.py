@@ -160,7 +160,8 @@ def _build_pdf_bytes(data: ProductData) -> bytes:
     if data.images:
         elements.append(Paragraph("<b>Images:</b>", styles['Heading3']))
         for img in data.images:
-            image_path = img.path if os.path.isabs(img.path) else os.path.join(os.getcwd(), img.path)
+            base_dir = os.path.dirname(__file__)
+            image_path = img.path if os.path.isabs(img.path) else os.path.join(base_dir, img.path)
             if os.path.exists(image_path):
                 try:
                     im = Image(image_path, width=(img.w or 200), height=(img.h or 150))
@@ -191,31 +192,7 @@ async def generate_catalog_pdf(data: ProductData):
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
 
-
-@app.get("/sample-catalog-pdf/")
-def sample_catalog_pdf():
-    sample = ProductData(
-        name="Sample Product",
-        description=["This is a sample product.", "Generated without request body."],
-        specifications=["Size: M", "Color: Red"],
-        images=[],
-        company=CompanyData(
-            name="Sample Company",
-            website="https://example.com",
-            address="City, Country",
-            phone="+1 555 1234",
-            email="info@example.com",
-        )
-    )
-    filename = f"Catalog_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-    pdf_bytes = _build_pdf_bytes(sample)
-    return Response(
-        content=pdf_bytes,
-        media_type="application/pdf",
-        headers={"Content-Disposition": f"attachment; filename={filename}"}
-    )
-
 if __name__ == "__main__":
     import uvicorn
     # Run with: py product.py  or  python product.py
-    uvicorn.run("product:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)

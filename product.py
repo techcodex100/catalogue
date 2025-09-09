@@ -1,24 +1,26 @@
 from fastapi import FastAPI, Response
-from pydantic import BaseModel, Field
-from typing import List, Optional
+from pydantic import BaseModel
+from typing import Optional
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Image, Table, TableStyle
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
+from reportlab.lib.utils import ImageReader
 from io import BytesIO
 import os
 from datetime import datetime
+import requests
 
 app = FastAPI()
 
-# ------------ MODELS -----------------
-class ImageData(BaseModel):
-    path: str
-    w: Optional[float] = None
-    h: Optional[float] = None
+# ------------ SETTINGS -----------------
+# Static image size for all images in the catalog (in points)
+IMAGE_WIDTH = 240
+IMAGE_HEIGHT = 160
 
+# ------------ MODELS -----------------
 class CompanyData(BaseModel):
     name: str
     website: Optional[str] = ""
@@ -34,9 +36,9 @@ class ProductData(BaseModel):
     fcl_type: Optional[str] = ""
     packaging: Optional[str] = ""
     quantity_per_fcl: Optional[str] = ""
-    description: List[str] = Field(default_factory=list)
-    specifications: List[str] = Field(default_factory=list)
-    images: List[ImageData] = Field(default_factory=list)
+    description: Optional[str] = ""
+    specifications: Optional[str] = ""
+    image_path: Optional[str] = ""
     client_name: Optional[str] = ""
     rate: Optional[str] = ""
     expiry_date: Optional[str] = ""
@@ -103,18 +105,18 @@ def _build_pdf_bytes(data: ProductData) -> bytes:
     elements.append(Paragraph(data.name.upper(), title_style))
     elements.append(Spacer(1, 20))
 
-    # Description
+    # Description (single paragraph)
     if data.description:
         elements.append(Paragraph("<b>Description:</b>", styles['Heading3']))
-        for line in data.description:
-            elements.append(Paragraph(line, styles['Normal']))
+        desc_html = data.description.replace("\n", "<br/>")
+        elements.append(Paragraph(desc_html, styles['Normal']))
         elements.append(Spacer(1, 12))
 
-    # Specifications
+    # Specifications (single paragraph)
     if data.specifications:
         elements.append(Paragraph("<b>Specifications:</b>", styles['Heading3']))
-        for spec in data.specifications:
-            elements.append(Paragraph(f"• {spec}", styles['Normal']))
+        specs_html = data.specifications.replace("\n", "<br/>")
+        elements.append(Paragraph(specs_html, styles['Normal']))
         elements.append(Spacer(1, 12))
 
     # Additional Details
@@ -156,21 +158,59 @@ def _build_pdf_bytes(data: ProductData) -> bytes:
         elements.append(table)
         elements.append(Spacer(1, 20))
 
-    # Images
-    if data.images:
-        elements.append(Paragraph("<b>Images:</b>", styles['Heading3']))
-        for img in data.images:
-            base_dir = os.path.dirname(__file__)
-            image_path = img.path if os.path.isabs(img.path) else os.path.join(base_dir, img.path)
-            if os.path.exists(image_path):
-                try:
-                    im = Image(image_path, width=(img.w or 200), height=(img.h or 150))
+    # Single Image
+    if data.image_path:
+        elements.append(Paragraph("<b>Image:</b>", styles['Heading3']))
+        base_dir = os.path.dirname(__file__)
+        raw_path = (data.image_path or "").strip().strip('"').strip("'")
+        try:
+            # Support file:// URLs for local absolute paths
+            if raw_path.lower().startswith("file://"):
+                # Normalize file URL to local path, handle both file:///C:/... and file://C:/...
+                file_part = raw_path.replace("file://", "").lstrip("/")
+                raw_path = file_part
+
+            if raw_path.lower().startswith(("http://", "https://")):
+                safe_url = raw_path.replace(" ", "%20")
+                resp = requests.get(safe_url, timeout=10)
+                resp.raise_for_status()
+                img_bytes = BytesIO(resp.content)
+                image_reader = ImageReader(img_bytes)
+                im = Image(image_reader, width=IMAGE_WIDTH, height=IMAGE_HEIGHT)
+                elements.append(im)
+                elements.append(Spacer(1, 10))
+            else:
+                # Normalize local path variants to maximize success on Windows
+                candidates = []
+                # Expand ~ and environment vars
+                expanded = os.path.expandvars(os.path.expanduser(raw_path))
+                normalized = os.path.normpath(expanded)
+                candidates.append(normalized)
+                if not os.path.isabs(normalized):
+                    candidates.append(os.path.normpath(os.path.join(base_dir, normalized)))
+                # Try swapping slashes as a fallback
+                swapped = normalized.replace("\\", "/")
+                if swapped != normalized:
+                    candidates.append(swapped)
+                    if not os.path.isabs(swapped):
+                        candidates.append(os.path.join(base_dir, swapped))
+
+                chosen_path = None
+                for candidate in candidates:
+                    if os.path.exists(candidate):
+                        chosen_path = candidate
+                        break
+
+                if chosen_path:
+                    im = Image(chosen_path, width=IMAGE_WIDTH, height=IMAGE_HEIGHT)
                     elements.append(im)
                     elements.append(Spacer(1, 10))
-                except Exception as e:
-                    print(f"Image error: {e}")
-            else:
-                print(f"File not found: {image_path}")
+                else:
+                    print(f"File not found. Tried: {candidates}")
+                    elements.append(Paragraph("Image not found at the provided path.", styles['Italic']))
+        except Exception as e:
+            print(f"Image error: {e}")
+            elements.append(Paragraph("Image could not be rendered.", styles['Italic']))
 
     # Build PDF with header/footer
     doc.build(
